@@ -1,0 +1,5 @@
+{
+  "name": "VoxBook AI",
+  "description": "A fluid, AI-powered audiobook converter for PDF and DOCX files with natural-sounding voices and immersive reading experience.",
+  "requestFramePermissions": []
+}
