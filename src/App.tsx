@@ -20,8 +20,14 @@ import {
   BookOpen,
   Sparkles
 } from 'lucide-react';
-import { extractTextFromPDF, extractTextFromDOCX, splitIntoChunks } from './lib/fileParser';
-import { generateSpeech, VoiceName } from './lib/gemini';
+import {
+  extractTextFromPDF,
+  extractTextFromDOCX,
+  splitIntoChunks,
+  validateFile,
+  ALLOWED_FILE_TYPES,
+} from './lib/fileParser';
+import { generateSpeech, VoiceName, VOICE_NAMES } from './lib/gemini';
 import { pcmToWav } from './lib/audio';
 import { cn } from './lib/utils';
 
@@ -32,6 +38,18 @@ const VOICES: { name: VoiceName; description: string }[] = [
   { name: 'Puck', description: 'Energetic & Bright' },
   { name: 'Charon', description: 'Calm & Steady' },
 ];
+
+/**
+ * Builds a playable URL from a validated TTS response. generateSpeech has
+ * already checked that the mime type is an audio type and that the payload is
+ * base64, so this can never produce, say, a `data:text/html` URL.
+ */
+function toAudioUrl(data: string, mimeType: string): string {
+  if (mimeType.toLowerCase().includes('audio/pcm') || mimeType.toLowerCase().includes('audio/l16')) {
+    return pcmToWav(data, 24000);
+  }
+  return `data:${mimeType};base64,${data}`;
+}
 
 export default function App() {
   const [file, setFile] = useState<File | null>(null);
@@ -54,25 +72,26 @@ export default function App() {
     }
   }, [currentChunkIndex]);
 
-  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const uploadedFile = e.target.files?.[0];
-    if (!uploadedFile) return;
-    
+  const processFile = async (uploadedFile: File) => {
+    // Validate before reading anything: size cap, extension and reported type.
+    const validationError = validateFile(uploadedFile);
+    if (validationError) {
+      alert(validationError);
+      return;
+    }
+
     setFile(uploadedFile);
     setIsParsing(true);
-    
+
     try {
-      let extractedText = '';
-      if (uploadedFile.type === 'application/pdf') {
-        extractedText = await extractTextFromPDF(uploadedFile);
-      } else if (uploadedFile.type === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') {
-        extractedText = await extractTextFromDOCX(uploadedFile);
-      } else {
-        alert('Unsupported file type. Please upload PDF or DOCX.');
-        setIsParsing(false);
-        return;
-      }
-      
+      const isPdf =
+        uploadedFile.type === ALLOWED_FILE_TYPES.pdf ||
+        uploadedFile.name.toLowerCase().endsWith('.pdf');
+
+      const extractedText = isPdf
+        ? await extractTextFromPDF(uploadedFile)
+        : await extractTextFromDOCX(uploadedFile);
+
       setText(extractedText);
       const textChunks = splitIntoChunks(extractedText, 400);
       setChunks(textChunks);
@@ -81,9 +100,15 @@ export default function App() {
       console.error('Parsing error:', error);
       const message = error instanceof Error ? error.message : 'Failed to parse file.';
       alert(message);
+      setFile(null);
     } finally {
       setIsParsing(false);
     }
+  };
+
+  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const uploadedFile = e.target.files?.[0];
+    if (uploadedFile) void processFile(uploadedFile);
   };
 
   const playCurrentChunk = async (index: number) => {
@@ -95,14 +120,9 @@ export default function App() {
     setIsLoadingAudio(true);
     try {
       const { data, mimeType } = await generateSpeech(chunks[index], { voiceName: selectedVoice });
-      
-      let audioUrl = '';
-      if (mimeType.includes('audio/pcm')) {
-        audioUrl = pcmToWav(data, 24000);
-      } else {
-        audioUrl = `data:${mimeType};base64,${data}`;
-      }
-      
+
+      const audioUrl = toAudioUrl(data, mimeType);
+
       if (audioRef.current) {
         audioRef.current.src = audioUrl;
         audioRef.current.playbackRate = playbackSpeed;
@@ -195,10 +215,7 @@ export default function App() {
               onDrop={(e) => {
                 e.preventDefault();
                 const droppedFile = e.dataTransfer.files[0];
-                if (droppedFile) {
-                  const event = { target: { files: [droppedFile] } } as any;
-                  handleFileUpload(event);
-                }
+                if (droppedFile) void processFile(droppedFile);
               }}
               className="group relative cursor-pointer"
             >
@@ -286,22 +303,20 @@ export default function App() {
                   <select 
                     value={selectedVoice}
                     onChange={(e) => {
-                      const newVoice = e.target.value as VoiceName;
+                      const candidate = e.target.value;
+                      if (!VOICE_NAMES.includes(candidate as VoiceName)) return;
+                      const newVoice = candidate as VoiceName;
                       setSelectedVoice(newVoice);
                       // Play a small preview if not already playing a book
                       if (!isPlaying && !isLoadingAudio) {
-                        generateSpeech("Hello, I am " + newVoice, { voiceName: newVoice }).then(({ data, mimeType }) => {
-                          let audioUrl = '';
-                          if (mimeType.includes('audio/pcm')) {
-                            audioUrl = pcmToWav(data, 24000);
-                          } else {
-                            audioUrl = `data:${mimeType};base64,${data}`;
-                          }
-                          if (audioRef.current) {
-                            audioRef.current.src = audioUrl;
-                            audioRef.current.play();
-                          }
-                        });
+                        generateSpeech("Hello, I am " + newVoice, { voiceName: newVoice })
+                          .then(({ data, mimeType }) => {
+                            if (audioRef.current) {
+                              audioRef.current.src = toAudioUrl(data, mimeType);
+                              audioRef.current.play();
+                            }
+                          })
+                          .catch((error) => console.error('Voice preview failed:', error));
                       }
                     }}
                     className="bg-transparent text-sm font-medium focus:outline-none cursor-pointer hover:text-brand-orange transition-colors"
